@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Local AI Chat"
+description = "A private ChatGPT-style assistant that runs locally in the browser without external APIs, with persistent conversations, multiple assistant modes, and a built-in reasoning engine."
+version = "1.0.0"
+id = "artifacts/local-ai-chat"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22779
+
+[services.development]
+run = "pnpm --filter @workspace/local-ai-chat run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/local-ai-chat", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/local-ai-chat/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22779"
+BASE_PATH = "/"
