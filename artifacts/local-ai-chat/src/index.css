@@ -176,6 +176,38 @@
   .nova-scrollbar::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 100px; }
   .nova-pop { animation: nova-pop 420ms cubic-bezier(.22, 1, .36, 1) both; }
   .nova-rise { animation: nova-rise 560ms cubic-bezier(.22, 1, .36, 1) both; }
+  .nova-statusbar {
+    min-height: 38px;
+    background: hsl(var(--card) / 0.34);
+  }
+  .nova-status-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: hsl(165 30% 42%);
+    box-shadow: 0 0 0 4px hsl(165 30% 42% / 0.12);
+  }
+  .nova-status-dot.is-offline {
+    background: hsl(var(--accent));
+    box-shadow: 0 0 0 4px hsl(var(--accent) / 0.12);
+  }
+  .nova-thinking-orb {
+    animation: nova-breathe 1.8s ease-in-out infinite;
+  }
+  .nova-thinking-copy {
+    animation: nova-copy-in 260ms ease-out both;
+  }
+  .nova-sources a {
+    text-decoration: none;
+  }
+  .nova-drawer {
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 20px 0 60px hsl(202 30% 16% / 0.12);
+  }
+  .nova-composer-wrap {
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  }
   .nova-sheen { position: relative; overflow: hidden; }
   .nova-sheen::before {
     content: '';
@@ -199,6 +231,56 @@
 @keyframes nova-sheen {
   0%, 48% { transform: translateX(-100%); }
   68%, 100% { transform: translateX(100%); }
+}
+@keyframes nova-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+@keyframes nova-copy-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (max-width: 767px) {
+  .nova-header {
+    height: 64px;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+  .nova-statusbar {
+    min-height: 34px;
+    padding-left: 0.875rem;
+    padding-right: 0.875rem;
+  }
+  .nova-statusbar > div:last-child span {
+    max-width: 9.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nova-drawer {
+    width: min(286px, calc(100vw - 1.25rem));
+    box-shadow: 18px 0 48px hsl(202 30% 16% / 0.2);
+  }
+  .nova-message-list {
+    padding-top: 1.5rem;
+    padding-bottom: 11rem;
+  }
+  .nova-message-list .max-w-\[82\%\] {
+    max-width: calc(100% - 2.75rem);
+  }
+  .nova-composer-wrap {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    padding-top: 3.5rem;
+  }
+  .nova-composer {
+    border-radius: 1.15rem;
+  }
+  .nova-composer textarea {
+    min-height: 52px;
+    max-height: 132px;
+    font-size: 0.875rem;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

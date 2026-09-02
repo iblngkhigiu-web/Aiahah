@@ -168,7 +168,7 @@ router.post("/llama/chat", async (req, res): Promise<void> => {
     }
 
     const webContext = sources.length
-      ? `\n\nWeb research context. Use it as evidence, distinguish facts from uncertainty, and do not invent details:\n${sources.map((source, index) => `${index + 1}. ${source.title}\nURL: ${source.url}\nSummary: ${source.snippet}`).join("\n\n")}`
+      ? `\n\nWeb research context. Use it as evidence, distinguish facts from uncertainty, and do not invent details. Do not invent temperatures, percentages, dates, names, or other numbers that are not present in the snippets. If the sources do not contain the requested detail, say that it is unavailable and ask for the missing location or date instead of guessing:\n${sources.map((source, index) => `${index + 1}. ${source.title}\nURL: ${source.url}\nSummary: ${source.snippet}`).join("\n\n")}`
       : "";
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
@@ -186,6 +186,7 @@ router.post("/llama/chat", async (req, res): Promise<void> => {
           })),
         ],
       }),
+      signal: AbortSignal.timeout(90_000),
     });
 
     if (!response.ok) {
