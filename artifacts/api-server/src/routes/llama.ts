@@ -1,13 +1,13 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { Router, type IRouter } from "express";
-import { LlamaChatBody, LlamaChatResponse } from "@workspace/api-zod";
+import { Router, type IRouter, type Response } from "express";
+import { LlamaChatBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 
 const execFile = promisify(execFileCallback);
 const router: IRouter = Router();
 const OLLAMA_URL = "http://127.0.0.1:11434";
-const MODEL = process.env.LLAMA_MODEL ?? "llama3.2:3b";
+const MODEL = process.env.LLAMA_MODEL ?? "gemma4:e4b";
 const STARTUP_TIMEOUT_MS = 30_000;
 const MODEL_PULL_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -15,7 +15,7 @@ let ollamaReadyPromise: Promise<void> | null = null;
 let modelReadyPromise: Promise<void> | null = null;
 
 type OllamaTags = { models?: Array<{ name?: string }> };
-type OllamaChatResponse = { message?: { content?: string } };
+type OllamaStreamChunk = { message?: { content?: string }; done?: boolean; error?: string };
 type SearchSource = { title: string; url: string; snippet: string };
 
 async function ollamaIsReachable() {
@@ -77,6 +77,19 @@ async function ensureModel() {
   await modelReadyPromise;
 }
 
+function startEventStream(res: Response) {
+  res.status(200);
+  res.setHeader("content-type", "text/event-stream; charset=utf-8");
+  res.setHeader("cache-control", "no-cache, no-transform");
+  res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders();
+}
+
+function writeStreamEvent(res: Response, event: { delta?: string; done?: boolean; model?: string; local?: boolean; sources?: SearchSource[]; error?: string }) {
+  res.write("data: " + JSON.stringify(event) + "\n\n");
+}
+
 function decodeHtml(value: string) {
   return value
     .replace(/<[^>]+>/g, " ")
@@ -114,7 +127,7 @@ async function searchWeb(query: string): Promise<SearchSource[]> {
 }
 
 function needsWebSearch(query: string) {
-  return /\b(20\d{2}|19\d{2}|today|latest|current|news|price|weather|who|when|where|research|search|internet|güncel|bugün|haber|fiyat|hava|kim|ne zaman|nerede|araştır|ara|internet)\b|\?/.test(query.toLocaleLowerCase("en-US"));
+  return /\b(20\d{2}|19\d{2}|today|latest|current|news|price|weather|who|when|where|research|search|internet|güncel|bugün|haber|fiyat|hava|kim|ne zaman|nerede|araştır|ara|internet)\b/.test(query.toLocaleLowerCase("en-US"));
 }
 
 function exactAgeAnswer(query: string) {
@@ -136,51 +149,57 @@ function systemPrompt(mode: "Focus" | "Create" | "Code") {
     Create: "Help the user create. Turn rough ideas into strong drafts, options, or concrete plans. Preserve their intent and be specific.",
     Code: "Act as a careful senior programming partner. Explain the cause, show the fix, and call out assumptions. Prefer working examples over vague advice.",
   };
-  return `You are NOVA, a helpful and honest private assistant running on a local Llama model. ${modeInstructions[mode]} Answer in the same language as the user. Never claim to have browsed the web or used a tool when you have not. If you are unsure, say so plainly. Do not repeat the user's prompt as filler.`;
+  return `You are NOVA, a helpful and honest private assistant running on a local Gemma 4 model. ${modeInstructions[mode]} Answer in the same language as the user. Never claim to have browsed the web or used a tool when you have not. If you are unsure, say so plainly. Do not repeat the user's prompt as filler.`;
 }
 
 router.post("/llama/chat", async (req, res): Promise<void> => {
   const parsed = LlamaChatBody.safeParse(req.body);
   if (!parsed.success) {
-    req.log.warn({ errors: parsed.error.message }, "Invalid local Llama request");
+    req.log.warn({ errors: parsed.error.message }, "Invalid local model request");
     res.status(400).json({ error: parsed.error.message });
     return;
   }
 
   try {
-    await ensureModel();
     const latestUserMessage = [...parsed.data.messages].reverse().find((message) => message.role === "user")?.content ?? "";
     const shouldSearch = parsed.data.webEnabled !== false && needsWebSearch(latestUserMessage);
-    let sources: SearchSource[] = [];
-    if (shouldSearch) {
-      try {
-        sources = await searchWeb(latestUserMessage);
-        req.log.info({ resultCount: sources.length }, "Completed local web research");
-      } catch (error) {
-        req.log.warn({ err: error }, "Web research unavailable; continuing without sources");
-      }
-    }
+    const modelPromise = ensureModel();
+    const sourcesPromise: Promise<SearchSource[]> = shouldSearch
+      ? searchWeb(latestUserMessage).then((foundSources) => {
+          req.log.info({ resultCount: foundSources.length }, "Completed local web research");
+          return foundSources;
+        }).catch((error) => {
+          req.log.warn({ err: error }, "Web research unavailable; continuing without sources");
+          return [];
+        })
+      : Promise.resolve([]);
+    await modelPromise;
+    const sources = await sourcesPromise;
 
     const exactAge = exactAgeAnswer(latestUserMessage);
     if (exactAge) {
-      res.json(LlamaChatResponse.parse({ content: exactAge, model: MODEL, local: true, sources }));
+      startEventStream(res);
+      writeStreamEvent(res, { delta: exactAge });
+      writeStreamEvent(res, { done: true, model: MODEL, local: true, sources });
+      res.end();
       return;
     }
 
     const webContext = sources.length
       ? `\n\nWeb research context. Use it as evidence, distinguish facts from uncertainty, and do not invent details. Do not invent temperatures, percentages, dates, names, or other numbers that are not present in the snippets. If the sources do not contain the requested detail, say that it is unavailable and ask for the missing location or date instead of guessing:\n${sources.map((source, index) => `${index + 1}. ${source.title}\nURL: ${source.url}\nSummary: ${source.snippet}`).join("\n\n")}`
       : "";
-    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+    const response = await fetch(OLLAMA_URL + "/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: MODEL,
-        stream: false,
-        options: { temperature: 0.65, num_ctx: 4096 },
+        stream: true,
+        keep_alive: "30m",
+        options: { temperature: 0.55, num_ctx: 2048, num_predict: 512, top_p: 0.9 },
         messages: [
           { role: "system", content: systemPrompt(parsed.data.mode) },
           ...(webContext ? [{ role: "system" as const, content: webContext }] : []),
-          ...parsed.data.messages.map((message) => ({
+          ...parsed.data.messages.slice(-12).map((message) => ({
             role: message.role,
             content: message.content,
           })),
@@ -196,25 +215,57 @@ router.post("/llama/chat", async (req, res): Promise<void> => {
       return;
     }
 
-    const data = (await response.json()) as OllamaChatResponse;
-    const content = data.message?.content?.trim();
-    if (!content) {
-      req.log.error("Local Llama returned an empty response");
-      res.status(503).json({ error: "The local Llama model returned an empty response." });
+    if (!response.body) throw new Error("The local model returned no response stream");
+
+    startEventStream(res);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+    let finished = false;
+
+    const consumeLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const chunk = JSON.parse(trimmed) as OllamaStreamChunk;
+      if (chunk.error) throw new Error(chunk.error);
+      const delta = chunk.message?.content ?? "";
+      if (delta) {
+        content += delta;
+        writeStreamEvent(res, { delta });
+      }
+      if (chunk.done) finished = true;
+    };
+
+    while (!finished) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const streamLines = buffer.split("\n");
+      buffer = streamLines.pop() ?? "";
+      for (const line of streamLines) consumeLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeLine(buffer);
+    if (!content.trim()) throw new Error("The local model returned an empty response");
+
+    writeStreamEvent(res, { done: true, model: MODEL, local: true, sources });
+    res.end();
+  } catch (error) {
+    req.log.error({ err: error }, "Local model is unavailable");
+    if (res.headersSent) {
+      writeStreamEvent(res, { error: "The local model stopped before completing the answer." });
+      res.end();
       return;
     }
-
-    res.json(LlamaChatResponse.parse({ content, model: MODEL, local: true, sources }));
-  } catch (error) {
-    req.log.error({ err: error }, "Local Llama is unavailable");
     res.status(503).json({
-      error: "Local Llama is not ready yet. Keep Ollama installed and try again in a moment.",
+      error: "Local model is not ready yet. Keep Ollama installed and try again in a moment.",
     });
   }
 });
 
 void ensureModel().catch((error) => {
-  logger.warn({ err: error, model: MODEL }, "Local Llama warm-up did not complete");
+  logger.warn({ err: error, model: MODEL }, "Local model warm-up did not complete");
 });
 
 export default router;
