@@ -41,15 +41,127 @@ function readConversations(): Conversation[] {
   }
 }
 
-function localAnswer(mode: Mode, prompt: string) {
+function detectLanguage(text: string): 'tr' | 'en' {
+  const turkish = /\b(merhaba|selam|nasıl|neden|ne|ben|sen|için|ile|ama|değil|yardım|istiyorum|yapar|mı|mi|mu|mü)\b|[çğıöşüİ]/i;
+  return turkish.test(text) ? 'tr' : 'en';
+}
+
+function calculateLocally(text: string) {
+  const expression = text
+    .toLowerCase()
+    .replace(/kaç eder|hesapla|calculate|what is|equals|=/g, '')
+    .replace(/[^0-9+\-*/().% ]/g, '')
+    .trim();
+  if (!expression || !/[+\-*/%]/.test(expression) || !/^[0-9+\-*/().% ]+$/.test(expression)) return null;
+
+  try {
+    const tokens = expression.match(/(\d+(?:\.\d+)?|[+\-*/%()])/g);
+    if (!tokens || tokens.join('') !== expression.replace(/\s/g, '')) return null;
+    const values: (number | string)[] = [];
+    const operators: string[] = [];
+    const precedence = (operator: string) => (operator === '+' || operator === '-' ? 1 : 2);
+    const apply = () => {
+      const operator = operators.pop();
+      const right = values.pop();
+      const left = values.pop();
+      if (typeof left !== 'number' || typeof right !== 'number' || !operator) throw new Error('invalid');
+      values.push(operator === '+' ? left + right : operator === '-' ? left - right : operator === '*' ? left * right : operator === '/' ? left / right : left % right);
+    };
+    for (const token of tokens) {
+      if (!Number.isNaN(Number(token))) values.push(Number(token));
+      else if (token === '(') operators.push(token);
+      else if (token === ')') {
+        while (operators.length && operators.at(-1) !== '(') apply();
+        if (operators.pop() !== '(') return null;
+      } else {
+        while (operators.length) {
+          const topOperator = operators.at(-1);
+          if (!topOperator || topOperator === '(' || precedence(topOperator) < precedence(token)) break;
+          apply();
+        }
+        operators.push(token);
+      }
+    }
+    while (operators.length) {
+      if (operators.at(-1) === '(') return null;
+      apply();
+    }
+    const result = values[0];
+    return typeof result === 'number' && Number.isFinite(result) ? Number(result.toFixed(8)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function localAnswer(mode: Mode, prompt: string, history: Message[]) {
   const clean = prompt.trim().replace(/\s+/g, ' ');
-  if (mode === 'Create') {
-    return `Let's give that idea a useful shape.\n\n**A clear starting point**\n${clean}\n\nTry this next: write the smallest version that could be true by the end of today. Keep the rough edges visible; we can refine once the direction has earned its place.`;
+  const language = detectLanguage(clean);
+  const lower = clean.toLocaleLowerCase(language === 'tr' ? 'tr-TR' : 'en-US');
+  const previousUserMessage = [...history].reverse().find((message) => message.role === 'user')?.content;
+  const result = calculateLocally(clean);
+
+  if (result !== null) {
+    return language === 'tr'
+      ? `Sonuç: **${result}**\n\nİşlemi yerel olarak hesapladım. Başka bir işlem veya farklı bir açıklama istersen yazabilirsin.`
+      : `The result is **${result}**.\n\nI calculated it locally. Send another expression if you want to keep going.`;
   }
+
+  if (/^(hello|hi|hey|hello there|good morning|good afternoon|good evening)[!. ]*$/i.test(clean)) {
+    return `Hello. I’m NOVA, your private thinking partner.\n\nI can help you plan something, explain an idea, write or rewrite text, work through a decision, solve a calculation, or reason through code. What would you like to start with?`;
+  }
+
+  if (/^(merhaba|selam|selamlar|günaydın|iyi akşamlar)[!. ]*$/i.test(clean)) {
+    return `Merhaba. Ben NOVA, özel düşünme yardımcınım.\n\nBir plan kurabilir, bir konuyu açıklayabilir, metin yazabilir veya düzeltebilir, bir kararı değerlendirebilir, hesap yapabilir ve kod üzerinde düşünebilirim. Nereden başlayalım?`;
+  }
+
+  if (clean.split(/\s+/).length === 1 && clean.length < 18 && !/^(thanks?|thank you|okay|ok|yes|no|why|how|what|help|teşekkür|tamam|evet|hayır|neden|nasıl|ne)$/i.test(clean)) {
+    return language === 'tr'
+      ? `“${clean}” ifadesini tam olarak anlayamadım. Bir kişi, kavram, ürün veya yazım hatası mı? Biraz bağlam verirsen doğru şekilde yardımcı olabilirim.`
+      : `I’m not sure what “${clean}” refers to. Is it a person, concept, product, or typo? Add a little context and I’ll give you a useful answer instead of guessing.`;
+  }
+
+  if (/who are you|what can you do|what are you|sen kimsin|ne yapabilirsin|nasıl çalışıyorsun/i.test(lower)) {
+    return language === 'tr'
+      ? `Ben NOVA. Bu uygulamanın içinde çalışan yerel bir yardımcıyım.\n\nKonuşmaların tarayıcıda kalır. Planlama, yazma, açıklama, karar verme, temel hesaplama ve kod düşünme konularında yardımcı olabilirim. Bir bulut modelinin geniş bilgisini kullanmadığım için bilmediğim şeylerde tahmin yürütmek yerine bunu açıkça söylerim.`
+      : `I’m NOVA, a local assistant built into this app.\n\nYour conversations stay in this browser. I can help with planning, writing, explanations, decisions, basic calculations, and code reasoning. Because I do not use a cloud model, I’ll say when I don’t know something instead of pretending.`;
+  }
+
+  if (/thanks|thank you|teşekkür|sağ ol/i.test(lower)) {
+    return language === 'tr' ? `Rica ederim. Başka ne üzerinde düşünelim?` : `You’re welcome. What should we think through next?`;
+  }
+
   if (mode === 'Code') {
-    return `I’ll reason through this locally, without sending your code anywhere.\n\n**First pass**\n${clean}\n\nA good next move is to isolate one expected input and one expected output, then test the smallest path between them. If you share the relevant snippet, I can help trace the edge cases and propose a focused change.`;
+    if (/error|bug|broken|hata|çalışmıyor|çök|exception/i.test(lower)) {
+      return language === 'tr'
+        ? `Sorunu izole edebilmem için hata mesajını, ilgili kod parçasını ve beklediğin davranışı gönder.\n\nŞu sırayla inceleyeceğim:\n1. Hatanın oluştuğu satır ve gerçek değerler\n2. Beklenen ve gerçekleşen çıktı farkı\n3. En küçük düzeltme\n4. Aynı hatanın geri gelmemesi için bir kontrol`
+        : `Send the error message, the relevant code, and what you expected to happen.\n\nI’ll work through it in this order:\n1. The failing line and actual values\n2. The difference between expected and observed output\n3. The smallest fix\n4. A guard that prevents the same failure returning`;
+    }
+    return language === 'tr'
+      ? `Kod isteğini anladım: **${clean}**\n\nBunu doğru çözmek için kullandığın dil veya framework ile birlikte mevcut kodu ve aldığın çıktıyı paylaş. Sonra problemi parçalara ayırıp doğrudan uygulanabilir bir çözüm çıkaracağım.`
+      : `I understand the coding task: **${clean}**\n\nTo solve it accurately, share the language or framework, the relevant code, and the output you’re getting. I’ll break the problem down and propose a directly usable fix.`;
   }
-  return `Here’s a quieter way to look at it.\n\n**What seems central**\n${clean}\n\nSeparate the signal from the pressure around it. Name the decision you actually need to make, then list the one piece of information that would change your mind. That usually gives the next step somewhere solid to land.`;
+
+  if (mode === 'Create') {
+    return language === 'tr'
+      ? `Fikri birlikte şekillendirelim: **${clean}**\n\nÖnce hedefi tek cümleye indir: bunu kim kullanacak ve hangi problemi çözecek? Sonra en küçük ilk sürümü belirleyelim. İstersen fikri ürün açıklamasına, plana, başlığa veya taslağa dönüştürebilirim.`
+      : `Let’s shape the idea: **${clean}**\n\nFirst reduce the goal to one sentence: who is this for, and what problem does it solve? Then we can define the smallest first version. I can turn the idea into copy, a plan, a title, or a draft.`;
+  }
+
+  if (/plan|steps|how do i|advice|decide|decision|planla|adım|nasıl|karar|tavsiye/i.test(lower)) {
+    return language === 'tr'
+      ? `Bunu adımlara ayıralım: **${clean}**\n\n**1. Hedef**\nİstediğin sonucu tek cümleyle yaz.\n\n**2. Kısıt**\nZaman, para, bilgi veya başka hangi sınır var?\n\n**3. İlk hareket**\nBugün 15 dakikada yapabileceğin en küçük adımı seç.\n\nİstersen hedefini ve kısıtını yaz; sana genel tavsiye değil, somut bir plan çıkarayım.`
+      : `Let’s turn this into steps: **${clean}**\n\n**1. Outcome**\nWrite the result you want in one sentence.\n\n**2. Constraint**\nWhat limits you: time, money, knowledge, or something else?\n\n**3. First move**\nChoose the smallest action you can complete in 15 minutes today.\n\nShare the outcome and constraint if you want a concrete plan rather than generic advice.`;
+  }
+
+  if (previousUserMessage && /^(and|also|why|how|peki|neden|nasıl|ya|then|what about)\b/i.test(lower)) {
+    return language === 'tr'
+      ? `Önceki konuyu (**${previousUserMessage.slice(0, 80)}${previousUserMessage.length > 80 ? '…' : ''}**) temel alarak bunu şöyle netleştirebiliriz: sorunun hangi kısmını açmamı istiyorsun? “Neden”, “nasıl” veya “örnek” diye belirtirsen doğrudan oradan devam ederim.`
+      : `Using the previous topic (**${previousUserMessage.slice(0, 80)}${previousUserMessage.length > 80 ? '…' : ''}), which part should I expand: the reason, the method, or an example? Tell me which one and I’ll continue directly.`;
+  }
+
+  return language === 'tr'
+    ? `Bunu anladım: **${clean}**\n\nDaha doğru yardımcı olabilmem için amacını veya istediğin çıktı biçimini belirtir misin? Örneğin “bunu özetle”, “bir plan çıkar”, “daha basit anlat” veya “örnek ver” diyebilirsin.`
+    : `I understand: **${clean}**\n\nTo help more precisely, tell me the goal or the format you want. For example: “summarize this,” “make a plan,” “explain it simply,” or “give me an example.”`;
 }
 
 function relativeTime(timestamp: number) {
@@ -168,7 +280,7 @@ function AppShell() {
     setDraft('');
     setIsThinking(true);
     window.setTimeout(() => {
-      const assistantMessage: Message = { id: makeId(), role: 'assistant', content: localAnswer(mode, prompt), createdAt: Date.now() };
+      const assistantMessage: Message = { id: makeId(), role: 'assistant', content: localAnswer(mode, prompt, activeConversation.messages), createdAt: Date.now() };
       updateConversation(activeConversation.id, (conversation) => ({
         ...conversation,
         updatedAt: Date.now(),
