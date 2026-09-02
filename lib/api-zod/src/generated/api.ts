@@ -25,20 +25,26 @@ export const llamaChatBodyMessagesItemContentMax = 12000;
 
 export const llamaChatBodyMessagesMax = 24;
 
-
+export const llamaChatBodyWebEnabledDefault = true;
 
 export const LlamaChatBody = zod.object({
   "mode": zod.enum(['Focus', 'Create', 'Code']),
   "messages": zod.array(zod.object({
   "role": zod.enum(['user', 'assistant']),
   "content": zod.string().min(1).max(llamaChatBodyMessagesItemContentMax)
-})).min(1).max(llamaChatBodyMessagesMax)
+})).min(1).max(llamaChatBodyMessagesMax),
+  "webEnabled": zod.boolean().default(llamaChatBodyWebEnabledDefault)
 })
 
 export const LlamaChatResponse = zod.object({
   "content": zod.string(),
   "model": zod.string(),
-  "local": zod.boolean()
+  "local": zod.boolean(),
+  "sources": zod.array(zod.object({
+  "title": zod.string(),
+  "url": zod.string(),
+  "snippet": zod.string()
+}))
 })
 
 

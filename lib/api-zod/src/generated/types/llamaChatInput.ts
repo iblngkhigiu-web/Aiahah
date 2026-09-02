@@ -15,4 +15,5 @@ export interface LlamaChatInput {
      * @maxItems 24
      */
   messages: LlamaMessageInput[];
+  webEnabled?: boolean;
 }

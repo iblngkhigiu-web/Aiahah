@@ -42,11 +42,19 @@ export interface LlamaChatInput {
      * @maxItems 24
      */
   messages: LlamaMessageInput[];
+  webEnabled?: boolean;
+}
+
+export interface LlamaSource {
+  title: string;
+  url: string;
+  snippet: string;
 }
 
 export interface LlamaOutput {
   content: string;
   model: string;
   local: boolean;
+  sources: LlamaSource[];
 }
 

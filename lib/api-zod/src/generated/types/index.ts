@@ -12,3 +12,4 @@ export * from './llamaChatInputMode';
 export * from './llamaMessageInput';
 export * from './llamaMessageInputRole';
 export * from './llamaOutput';
+export * from './llamaSource';

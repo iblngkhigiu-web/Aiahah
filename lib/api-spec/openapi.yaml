@@ -70,6 +70,9 @@ components:
           maxItems: 24
           items:
             $ref: "#/components/schemas/LlamaMessageInput"
+        webEnabled:
+          type: boolean
+          default: true
       required:
         - mode
         - messages
@@ -95,8 +98,26 @@ components:
           type: string
         local:
           type: boolean
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/LlamaSource"
       required:
         - content
         - model
         - local
+        - sources
+    LlamaSource:
+      type: object
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+        snippet:
+          type: string
+      required:
+        - title
+        - url
+        - snippet
 
