@@ -164,6 +164,22 @@ function localAnswer(mode: Mode, prompt: string, history: Message[]) {
     : `I understand: **${clean}**\n\nTo help more precisely, tell me the goal or the format you want. For example: “summarize this,” “make a plan,” “explain it simply,” or “give me an example.”`;
 }
 
+async function llamaAnswer(mode: Mode, messages: Message[]) {
+  const response = await fetch('/api/llama/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      mode,
+      messages: messages.slice(-20).map(({ role, content }) => ({ role, content })),
+    }),
+  });
+  const data = (await response.json().catch(() => ({}))) as { content?: string; error?: string };
+  if (!response.ok || !data.content) {
+    throw new Error(data.error ?? 'The local Llama model is unavailable.');
+  }
+  return data.content;
+}
+
 function relativeTime(timestamp: number) {
   const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
   if (minutes < 1) return 'Just now';
@@ -265,11 +281,12 @@ function AppShell() {
     setShowModeMenu(false);
   }
 
-  function sendMessage() {
+  async function sendMessage() {
     const prompt = draft.trim();
     if (!prompt || isThinking || !activeConversation) return;
     const userMessage: Message = { id: makeId(), role: 'user', content: prompt, createdAt: Date.now() };
     const title = activeConversation.messages.length ? activeConversation.title : prompt.length > 34 ? `${prompt.slice(0, 34)}…` : prompt;
+    const context = [...activeConversation.messages, userMessage];
     updateConversation(activeConversation.id, (conversation) => ({
       ...conversation,
       title,
@@ -279,21 +296,35 @@ function AppShell() {
     }));
     setDraft('');
     setIsThinking(true);
-    window.setTimeout(() => {
-      const assistantMessage: Message = { id: makeId(), role: 'assistant', content: localAnswer(mode, prompt, activeConversation.messages), createdAt: Date.now() };
+    try {
+      const content = await llamaAnswer(mode, context);
+      const assistantMessage: Message = { id: makeId(), role: 'assistant', content, createdAt: Date.now() };
       updateConversation(activeConversation.id, (conversation) => ({
         ...conversation,
         updatedAt: Date.now(),
         messages: [...conversation.messages, assistantMessage],
       }));
+    } catch {
+      const language = detectLanguage(prompt);
+      const fallback = localAnswer(mode, prompt, activeConversation.messages);
+      const content = language === 'tr'
+        ? `Llama şu anda hazır değil; çevrimdışı yardımcıya geçtim.\n\n${fallback}`
+        : `Llama is not ready yet, so I switched to the offline helper.\n\n${fallback}`;
+      const assistantMessage: Message = { id: makeId(), role: 'assistant', content, createdAt: Date.now() };
+      updateConversation(activeConversation.id, (conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        messages: [...conversation.messages, assistantMessage],
+      }));
+    } finally {
       setIsThinking(false);
-    }, 980);
+    }
   }
 
   function handleDraftKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   }
 
@@ -388,7 +419,7 @@ function AppShell() {
             <div className="group relative rounded-2xl border border-[hsl(var(--input))] bg-[hsl(var(--card)/.94)] p-2 shadow-[0_10px_35px_hsl(202_30%_16%/.08)] backdrop-blur-md transition-colors focus-within:border-[hsl(var(--accent)/.7)] focus-within:shadow-[0_12px_40px_hsl(202_30%_16%/.12)]">
               <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleDraftKeyDown} disabled={isThinking} data-testid="input-message-composer" placeholder={isThinking ? 'NOVA is thinking locally…' : `Ask NOVA anything in ${mode} mode…`} rows={2} className="nova-scrollbar min-h-[58px] w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 outline-none placeholder:text-muted-foreground/70 disabled:opacity-60" />
               <div className="flex items-center justify-between px-2 pb-1 pt-2">
-                <div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="nova-mono rounded border border-[hsl(var(--border))] px-1.5 py-0.5">LOCAL</span><span className="hidden sm:inline">Nothing leaves this device</span></div>
+                <div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="nova-mono rounded border border-[hsl(var(--border))] px-1.5 py-0.5">LLAMA 3.2</span><span className="hidden sm:inline">No third-party AI service</span></div>
                 <div className="flex items-center gap-2"><span className="nova-mono hidden text-[9px] text-muted-foreground/70 sm:inline">Shift + Enter for new line</span><button type="button" disabled={!draft.trim() || isThinking} data-testid="button-send-message" onClick={sendMessage} className="flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-all hover:-translate-y-0.5 hover:bg-[hsl(var(--accent))] disabled:cursor-not-allowed disabled:opacity-30"><ArrowUp size={17} strokeWidth={2.5} /></button></div>
               </div>
             </div>
@@ -445,8 +476,8 @@ function SettingsPanel({ onClose, onClear }: { onClose: () => void; onClear: () 
     <button type="button" aria-label="Close settings overlay" data-testid="button-close-settings-overlay" className="absolute inset-0 bg-[hsl(202_30%_16%/.4)]" onClick={onClose} />
     <section className="nova-pop relative flex h-full w-full max-w-[430px] flex-col border-l border-[hsl(var(--border))] bg-[hsl(var(--background))] shadow-[var(--shadow-xl)]">
       <div className="flex items-start justify-between border-b border-[hsl(var(--border))] px-6 pb-5 pt-7"><div><p className="nova-mono mb-2 text-[9px] uppercase tracking-[.2em] text-muted-foreground">Workspace controls</p><h2 className="nova-serif text-3xl tracking-[-.035em]">Settings</h2></div><button type="button" aria-label="Close settings" data-testid="button-close-settings" onClick={onClose} className="rounded-lg p-2 text-muted-foreground hover:bg-[hsl(var(--muted))] hover:text-foreground"><X size={18} /></button></div>
-      <div className="nova-scrollbar flex-1 overflow-y-auto p-6">
-        <div className="nova-sheen rounded-2xl bg-[hsl(var(--primary))] p-5 text-[hsl(var(--primary-foreground))]"><div className="mb-5 flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[hsl(var(--secondary))]"><ShieldCheck size={21} /></div><div><p className="text-sm font-bold">Local-only privacy</p><p className="nova-mono mt-0.5 text-[9px] uppercase tracking-[.13em] opacity-60">Always on</p></div></div><p className="text-sm leading-6 text-[hsl(var(--primary-foreground)/.75)]">Your conversations are stored in this browser’s local storage. NOVA’s answer engine runs here in the app. Nothing is uploaded, profiled, or used to train an external service.</p></div>
+       <div className="nova-scrollbar flex-1 overflow-y-auto p-6">
+         <div className="nova-sheen rounded-2xl bg-[hsl(var(--primary))] p-5 text-[hsl(var(--primary-foreground))]"><div className="mb-5 flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[hsl(var(--secondary))]"><ShieldCheck size={21} /></div><div><p className="text-sm font-bold">Local Llama privacy</p><p className="nova-mono mt-0.5 text-[9px] uppercase tracking-[.13em] opacity-60">Llama 3.2 · always on</p></div></div><p className="text-sm leading-6 text-[hsl(var(--primary-foreground)/.75)]">Your conversations are stored in this browser’s local storage. Responses are generated by the locally installed Llama 3.2 model. Nothing is sent to a third-party AI service or used to train an external service.</p></div>
         <div className="mt-8"><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">How it works</h3><div className="divide-y divide-[hsl(var(--border))] rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)]"><InfoRow icon={<Zap size={15} />} title="Local answer engine" detail="Fast, private responses without a network request." /><InfoRow icon={<PanelLeft size={15} />} title="Browser memory" detail="Saved conversations stay on this device." /><InfoRow icon={<CircleHelp size={15} />} title="You’re in control" detail="Clear everything at any time, with one click." /></div></div>
         <div className="mt-8"><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">Data controls</h3><button type="button" data-testid="button-clear-local-data" onClick={onClear} className="flex w-full items-center justify-between rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)] px-4 py-3.5 text-left transition-colors hover:border-[hsl(var(--destructive)/.5)] hover:bg-[hsl(var(--destructive)/.06)]"><span><span className="block text-sm font-bold">Clear local conversations</span><span className="mt-1 block text-xs text-muted-foreground">Remove every saved thought from this browser.</span></span><Trash2 size={16} className="text-muted-foreground" /></button></div>
         <p className="nova-mono mt-10 text-[9px] leading-5 text-muted-foreground">NOVA / local intelligence<br />No account · No tracking · No external calls</p>

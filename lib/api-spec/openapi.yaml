@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: llama
+    description: Local Llama model operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /llama/chat:
+    post:
+      operationId: llamaChat
+      tags: [llama]
+      summary: Chat with the local Llama model
+      description: Generates a response with the locally installed Llama model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LlamaChatInput"
+      responses:
+        "200":
+          description: Generated response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LlamaOutput"
+        "400":
+          description: Invalid request
+        "503":
+          description: Local Llama is unavailable
 components:
   schemas:
     HealthStatus:
@@ -33,4 +58,45 @@ components:
           type: string
       required:
         - status
+    LlamaChatInput:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [Focus, Create, Code]
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 24
+          items:
+            $ref: "#/components/schemas/LlamaMessageInput"
+      required:
+        - mode
+        - messages
+    LlamaMessageInput:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 12000
+      required:
+        - role
+        - content
+    LlamaOutput:
+      type: object
+      properties:
+        content:
+          type: string
+        model:
+          type: string
+        local:
+          type: boolean
+      required:
+        - content
+        - model
+        - local
 
