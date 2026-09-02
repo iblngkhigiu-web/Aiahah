@@ -170,7 +170,7 @@ function localAnswer(mode: Mode, prompt: string, history: Message[]) {
     : `I understand: **${clean}**\n\nTo help more precisely, tell me the goal or the format you want. For example: “summarize this,” “make a plan,” “explain it simply,” or “give me an example.”`;
 }
 
-async function llamaAnswer(mode: Mode, messages: Message[]): Promise<{ content: string; sources: Source[] }> {
+async function llamaAnswer(mode: Mode, messages: Message[], onDelta?: (content: string) => void): Promise<{ content: string; sources: Source[] }> {
   const response = await fetch('/api/llama/chat', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -178,18 +178,50 @@ async function llamaAnswer(mode: Mode, messages: Message[]): Promise<{ content: 
     body: JSON.stringify({
       mode,
       webEnabled: true,
-      messages: messages.slice(-20).map(({ role, content }) => ({ role, content })),
+      messages: messages.slice(-12).map(({ role, content }) => ({ role, content })),
     }),
   });
-  const data = (await response.json().catch(() => ({}))) as {
-    content?: string;
-    error?: string;
-    sources?: Array<{ title: string; url: string }>;
-  };
-  if (!response.ok || !data.content) {
-    throw new Error(data.error ?? 'The local Llama model is unavailable.');
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!response.ok) {
+    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? 'The local Gemma model is unavailable.');
   }
-  return { content: data.content, sources: data.sources ?? [] };
+  if (!contentType.includes('text/event-stream') || !response.body) {
+    const data = (await response.json().catch(() => ({}))) as { content?: string; error?: string; sources?: Source[] };
+    if (!data.content) throw new Error(data.error ?? 'The local Gemma model is unavailable.');
+    onDelta?.(data.content);
+    return { content: data.content, sources: data.sources ?? [] };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let sources: Source[] = [];
+  const consumeEvent = (rawEvent: string) => {
+    const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data:'));
+    if (!dataLine) return;
+    const event = JSON.parse(dataLine.slice(5).trim()) as { delta?: string; done?: boolean; sources?: Source[]; error?: string };
+    if (event.error) throw new Error(event.error);
+    if (event.delta) {
+      content += event.delta;
+      onDelta?.(content);
+    }
+    if (event.sources) sources = event.sources;
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split('\n\n');
+    buffer = events.pop() ?? '';
+    for (const event of events) consumeEvent(event);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) consumeEvent(buffer);
+  if (!content) throw new Error('The local Gemma model returned an empty response.');
+  return { content, sources };
 }
 
 function relativeTime(timestamp: number) {
@@ -207,6 +239,7 @@ function AppShell() {
   const [mode, setMode] = useState<Mode>(() => conversations[0]?.mode ?? 'Focus');
   const [draft, setDraft] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
   const [thinkingStage, setThinkingStage] = useState(0);
   const [localStatus, setLocalStatus] = useState<'ready' | 'offline'>('ready');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -252,7 +285,7 @@ function AppShell() {
       messagesEndRef.current?.scrollIntoView({ behavior: isThinking ? 'smooth' : 'auto', block: 'end' });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeId, messages.length, isThinking]);
+  }, [activeId, messages.length, isThinking, streamingContent.length]);
 
   useEffect(() => {
     if (!isSidebarOpen) return;
@@ -339,21 +372,24 @@ function AppShell() {
     setDraft('');
     setLocalStatus('ready');
     setIsThinking(true);
+    setStreamingContent('');
     try {
-      const answer = await llamaAnswer(mode, context);
+      const answer = await llamaAnswer(mode, context, setStreamingContent);
       const assistantMessage: Message = { id: makeId(), role: 'assistant', content: answer.content, sources: answer.sources, createdAt: Date.now() };
       updateConversation(activeConversation.id, (conversation) => ({
         ...conversation,
         updatedAt: Date.now(),
         messages: [...conversation.messages, assistantMessage],
       }));
+      setStreamingContent('');
     } catch {
+      setStreamingContent('');
       setLocalStatus('offline');
       const language = detectLanguage(prompt);
       const fallback = localAnswer(mode, prompt, activeConversation.messages);
       const content = language === 'tr'
         ? `Llama şu anda hazır değil; çevrimdışı yardımcıya geçtim.\n\n${fallback}`
-        : `Llama is not ready yet, so I switched to the offline helper.\n\n${fallback}`;
+        : `Gemma is not ready yet, so I switched to the offline helper.\n\n${fallback}`;
       const assistantMessage: Message = { id: makeId(), role: 'assistant', content, createdAt: Date.now(), sources: [] };
       updateConversation(activeConversation.id, (conversation) => ({
         ...conversation,
@@ -450,7 +486,7 @@ function AppShell() {
         <div className="nova-statusbar flex shrink-0 items-center justify-between gap-3 border-b border-[hsl(var(--border)/.52)] px-5 py-2.5 sm:px-8 lg:px-12" role="status" aria-live="polite" data-testid="status-local-web">
           <div className="flex min-w-0 items-center gap-2.5">
             {localStatus === 'offline' ? <CircleAlert size={13} className="shrink-0 text-[hsl(var(--accent))]" /> : <span className="nova-status-dot" />}
-            <span className="truncate text-[11px] font-semibold text-foreground">{localStatus === 'offline' ? 'Offline helper active' : isThinking ? 'Local Llama 3.2 thinking' : 'Local Llama 3.2 ready'}</span>
+            <span className="truncate text-[11px] font-semibold text-foreground">{localStatus === 'offline' ? 'Offline helper active' : isThinking ? 'Local Gemma 4 thinking' : 'Local Gemma 4 ready'}</span>
             <span className="nova-mono hidden text-[9px] uppercase tracking-[.12em] text-muted-foreground sm:inline">{localStatus === 'offline' ? 'fallback' : isThinking ? 'request in progress' : 'private on this device'}</span>
           </div>
           <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground"><Search size={12} /><span>Web research on demand</span></div>
@@ -461,7 +497,7 @@ function AppShell() {
             {messages.length === 0 && !isThinking ? <EmptyState mode={mode} onPrompt={(prompt) => { setDraft(prompt); window.setTimeout(() => textareaRef.current?.focus(), 50); }} /> : <div className="space-y-9">
               <div className="nova-rise flex items-center gap-3"><div className="h-px flex-1 bg-[hsl(var(--border))]" /><span className="nova-mono text-[9px] uppercase tracking-[.17em] text-muted-foreground">Today · local session</span><div className="h-px flex-1 bg-[hsl(var(--border))]" /></div>
               {messages.map((message, index) => <MessageBlock key={message.id} message={message} index={index} copied={copiedId === message.id} onCopy={() => copyMessage(message)} />)}
-              {isThinking && <ThinkingState mode={mode} stage={thinkingStage} />}
+              {isThinking && (streamingContent ? <StreamingState content={streamingContent} /> : <ThinkingState mode={mode} stage={thinkingStage} />)}
             </div>}
             <div ref={messagesEndRef} aria-hidden="true" />
           </div>
@@ -472,7 +508,7 @@ function AppShell() {
             <div className="nova-composer group relative rounded-2xl border border-[hsl(var(--input))] bg-[hsl(var(--card)/.94)] p-2 shadow-[0_10px_35px_hsl(202_30%_16%/.08)] backdrop-blur-md transition-colors focus-within:border-[hsl(var(--accent)/.7)] focus-within:shadow-[0_12px_40px_hsl(202_30%_16%/.12)]" aria-busy={isThinking}>
               <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleDraftKeyDown} disabled={isThinking} data-testid="input-message-composer" placeholder={isThinking ? THINKING_STAGES[mode][thinkingStage] : `Ask NOVA anything in ${mode} mode…`} rows={2} className="nova-scrollbar min-h-[58px] w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 outline-none placeholder:text-muted-foreground/70 disabled:opacity-60" />
               <div className="flex items-center justify-between px-2 pb-1 pt-2">
-                <div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="nova-mono rounded border border-[hsl(var(--border))] px-1.5 py-0.5">LLAMA 3.2</span><span className="hidden sm:inline">Web research when needed</span></div>
+                <div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="nova-mono rounded border border-[hsl(var(--border))] px-1.5 py-0.5">GEMMA 4 E4B</span><span className="hidden sm:inline">Web research when needed</span></div>
                 <div className="flex items-center gap-2"><span className="nova-mono hidden text-[9px] text-muted-foreground/70 sm:inline">Shift + Enter for new line</span><button type="button" aria-label={isThinking ? 'Waiting for NOVA response' : 'Send message'} disabled={!draft.trim() || isThinking} data-testid="button-send-message" onClick={sendMessage} className="flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-all hover:-translate-y-0.5 hover:bg-[hsl(var(--accent))] disabled:cursor-not-allowed disabled:opacity-30"><ArrowUp size={17} strokeWidth={2.5} /></button></div>
               </div>
             </div>
@@ -548,6 +584,18 @@ function SourceList({ sources }: { sources: Source[] }) {
   </div>;
 }
 
+function StreamingState({ content }: { content: string }) {
+  return <article className="nova-rise flex gap-3 justify-start" role="status" aria-live="polite" data-testid="status-streaming">
+    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]"><Sparkles size={15} /></div>
+    <div className="max-w-[82%] sm:max-w-[70%] flex flex-col items-start">
+      <div className="rounded-2xl rounded-bl-md border border-[hsl(var(--border))] bg-[hsl(var(--card)/.72)] px-4 py-3.5 text-sm leading-6 text-foreground shadow-[0_3px_14px_hsl(202_30%_16%/.035)]">
+        {content.split('\n').map((line, lineIndex) => <p key={lineIndex} className={line === '' ? 'h-2' : ''}>{line.replace(/\*\*/g, '')}</p>)}<span className="ml-0.5 animate-pulse text-[hsl(var(--accent))]" aria-hidden="true">▋</span>
+      </div>
+      <div className="mt-1.5 px-1 text-[10px] text-muted-foreground"><span className="nova-mono">NOVA · responding</span></div>
+    </div>
+  </article>;
+}
+
 function ThinkingState({ mode, stage }: { mode: Mode; stage: number }) {
   const copy = THINKING_STAGES[mode][stage % THINKING_STAGES[mode].length];
   return <div className="nova-rise flex gap-3" role="status" aria-live="polite" aria-label={`NOVA is thinking: ${copy}`} data-testid="status-thinking">
@@ -565,8 +613,8 @@ function SettingsPanel({ onClose, onClear }: { onClose: () => void; onClear: () 
     <section className="nova-pop relative flex h-full w-full max-w-[430px] flex-col border-l border-[hsl(var(--border))] bg-[hsl(var(--background))] shadow-[var(--shadow-xl)]">
       <div className="flex items-start justify-between border-b border-[hsl(var(--border))] px-6 pb-5 pt-7"><div><p className="nova-mono mb-2 text-[9px] uppercase tracking-[.2em] text-muted-foreground">Workspace controls</p><h2 className="nova-serif text-3xl tracking-[-.035em]">Settings</h2></div><button type="button" aria-label="Close settings" data-testid="button-close-settings" onClick={onClose} className="rounded-lg p-2 text-muted-foreground hover:bg-[hsl(var(--muted))] hover:text-foreground"><X size={18} /></button></div>
        <div className="nova-scrollbar flex-1 overflow-y-auto p-6">
-         <div className="nova-sheen rounded-2xl bg-[hsl(var(--primary))] p-5 text-[hsl(var(--primary-foreground))]"><div className="mb-5 flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[hsl(var(--secondary))]"><ShieldCheck size={21} /></div><div><p className="text-sm font-bold">Local Llama privacy</p><p className="nova-mono mt-0.5 text-[9px] uppercase tracking-[.13em] opacity-60">Llama 3.2 · web when needed</p></div></div><p className="text-sm leading-6 text-[hsl(var(--primary-foreground)/.75)]">Your conversations are stored in this browser’s local storage and responses are generated by the locally installed Llama 3.2 model. When you ask for research, only your search query is sent to DuckDuckGo to retrieve public results; no third-party AI service receives your conversation.</p></div>
-         <div className="mt-8"><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">How it works</h3><div className="divide-y divide-[hsl(var(--border))] rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)]"><InfoRow icon={<Zap size={15} />} title="Local answer engine" detail="Llama 3.2 generates the response in the project environment." /><InfoRow icon={<Search size={15} />} title="Web when needed" detail="Research questions use public DuckDuckGo results and show their sources." /><InfoRow icon={<PanelLeft size={15} />} title="Browser memory" detail="Saved conversations stay on this device." /><InfoRow icon={<CircleHelp size={15} />} title="You’re in control" detail="Clear everything at any time, with one click." /></div></div>
+         <div className="nova-sheen rounded-2xl bg-[hsl(var(--primary))] p-5 text-[hsl(var(--primary-foreground))]"><div className="mb-5 flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[hsl(var(--secondary))]"><ShieldCheck size={21} /></div><div><p className="text-sm font-bold">Local Gemma privacy</p><p className="nova-mono mt-0.5 text-[9px] uppercase tracking-[.13em] opacity-60">Gemma 4 E4B · web when needed</p></div></div><p className="text-sm leading-6 text-[hsl(var(--primary-foreground)/.75)]">Your conversations are stored in this browser’s local storage and responses are generated by the locally installed Gemma 4 E4B model. When you ask for research, only your search query is sent to DuckDuckGo to retrieve public results; no third-party AI service receives your conversation.</p></div>
+         <div className="mt-8"><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">How it works</h3><div className="divide-y divide-[hsl(var(--border))] rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)]"><InfoRow icon={<Zap size={15} />} title="Local answer engine" detail="Gemma 4 E4B generates the response in the project environment." /><InfoRow icon={<Search size={15} />} title="Web when needed" detail="Research questions use public DuckDuckGo results and show their sources." /><InfoRow icon={<PanelLeft size={15} />} title="Browser memory" detail="Saved conversations stay on this device." /><InfoRow icon={<CircleHelp size={15} />} title="You’re in control" detail="Clear everything at any time, with one click." /></div></div>
         <div className="mt-8"><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-muted-foreground">Data controls</h3><button type="button" data-testid="button-clear-local-data" onClick={onClear} className="flex w-full items-center justify-between rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)] px-4 py-3.5 text-left transition-colors hover:border-[hsl(var(--destructive)/.5)] hover:bg-[hsl(var(--destructive)/.06)]"><span><span className="block text-sm font-bold">Clear local conversations</span><span className="mt-1 block text-xs text-muted-foreground">Remove every saved thought from this browser.</span></span><Trash2 size={16} className="text-muted-foreground" /></button></div>
          <p className="nova-mono mt-10 text-[9px] leading-5 text-muted-foreground">NOVA / local intelligence<br />No account · No tracking · Public web search only when needed</p>
       </div>
